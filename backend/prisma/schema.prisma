@@ -1,0 +1,529 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USERS & AUTHENTICATION
+// ============================================================================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  firstName    String?
+  lastName     String?
+  avatar       String?
+
+  // Relations
+  organizationId String?
+  organization   Organization? @relation("OrganizationMembers", fields: [organizationId], references: [id])
+
+  // Organization admin
+  ownedOrganizations Organization[] @relation("OrganizationOwner")
+
+  // Projects
+  projects Project[]
+
+  // Design metadata
+  favorites Design[] @relation("UserFavorites")
+
+  // Comments
+  comments DesignComment[]
+
+  // Activity
+  activityLogs ActivityLog[]
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+model Organization {
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
+  logo String?
+
+  // Owner
+  ownerId String
+  owner   User   @relation("OrganizationOwner", fields: [ownerId], references: [id])
+
+  // Members
+  members User[] @relation("OrganizationMembers")
+
+  // Billing
+  billingEmail    String
+  planTier        String @default("free") // free, starter, pro, enterprise
+  subscriptionId  String?
+  subscriptionEnd DateTime?
+
+  // Projects
+  projects Project[]
+
+  // Brand kits
+  brandKits BrandKit[]
+
+  // Templates
+  templates Template[]
+
+  // System assets
+  systemAssets SystemAsset[]
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  @@index([ownerId])
+}
+
+// ============================================================================
+// PROJECTS & DESIGNS
+// ============================================================================
+
+model Project {
+  id   String @id @default(cuid())
+  name String
+  slug String
+
+  // Organization
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Owner
+  ownerId String
+  owner   User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  // Designs
+  designs Design[]
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+  @@index([ownerId])
+}
+
+model Design {
+  id   String @id @default(cuid())
+  name String
+
+  // Project
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Format & dimensions
+  format String @default("instagram_feed") // instagram_feed, instagram_story, tiktok_video, etc.
+  width  Int    @default(1080)
+  height Int    @default(1080)
+
+  // Canvas configuration (JSONB - stored as JSON)
+  canvasConfig Json @default("{}")
+
+  // Brand kit (optional)
+  brandKitId String?
+  brandKit   BrandKit? @relation(fields: [brandKitId], references: [id])
+
+  // Status
+  status String @default("draft") // draft, saved, published, archived
+
+  // Generation job
+  generationJobId String?
+
+  // Versions
+  versions DesignVersion[]
+
+  // Exports
+  exports Export[]
+
+  // User favorites
+  favoritedBy User[] @relation("UserFavorites")
+
+  // Comments
+  comments DesignComment[]
+
+  // Metrics
+  metrics DesignMetrics?
+
+  // Agent execution tracking
+  agentExecutions AgentExecution[]
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  @@index([projectId])
+  @@index([brandKitId])
+  @@index([status])
+}
+
+model DesignVersion {
+  id   String @id @default(cuid())
+  name String
+  num  Int
+
+  // Design
+  designId String
+  design   Design @relation(fields: [designId], references: [id], onDelete: Cascade)
+
+  // Canvas configuration
+  canvasConfig Json
+
+  // Timestamps
+  createdAt DateTime @default(now())
+
+  @@unique([designId, num])
+  @@index([designId])
+}
+
+// ============================================================================
+// BRAND SYSTEM
+// ============================================================================
+
+model BrandKit {
+  id   String @id @default(cuid())
+  name String
+
+  // Organization
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Colors
+  colors ColorPalette?
+
+  // Fonts
+  fonts FontSet?
+
+  // Brand guidelines
+  brandVoice Json @default("{}")  // tone, personality, values
+  guidelines Json @default("{}")  // design rules, do's and don'ts
+  logoUrl    String?
+
+  // Designs using this kit
+  designs Design[]
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  @@index([organizationId])
+}
+
+model ColorPalette {
+  id   String @id @default(cuid())
+  name String
+
+  // Brand kit
+  brandKitId String @unique
+  brandKit   BrandKit @relation(fields: [brandKitId], references: [id], onDelete: Cascade)
+
+  // Colors (JSONB)
+  primary   String @default("#3B82F6")
+  secondary String @default("#10B981")
+  accent    String @default("#F59E0B")
+  neutral   String @default("#6B7280")
+  dark      String @default("#1F2937")
+  light     String @default("#F3F4F6")
+
+  // Additional colors
+  customColors Json @default("{}")
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model FontSet {
+  id   String @id @default(cuid())
+  name String
+
+  // Brand kit
+  brandKitId String @unique
+  brandKit   BrandKit @relation(fields: [brandKitId], references: [id], onDelete: Cascade)
+
+  // Fonts
+  headingFont    String @default("Inter")
+  bodyFont       String @default("Inter")
+  accentFont     String @default("Playfair Display")
+
+  // Font sizes
+  h1Size    Int @default(48)
+  h2Size    Int @default(36)
+  h3Size    Int @default(28)
+  bodySize  Int @default(16)
+  smallSize Int @default(12)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================================================
+// ASSETS & TEMPLATES
+// ============================================================================
+
+model Asset {
+  id   String @id @default(cuid())
+  name String
+  url  String
+
+  // Design
+  designId String
+  design   Design @relation(fields: [designId], references: [id], onDelete: Cascade)
+
+  // Type
+  type String // image, icon, shape, etc.
+
+  // Metadata
+  width  Int?
+  height Int?
+  size   Int? // file size in bytes
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([designId])
+}
+
+model SystemAsset {
+  id   String @id @default(cuid())
+  name String
+  url  String
+
+  // Organization
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Type & category
+  type     String // image, icon, shape, stock_photo
+  category String // social_media, headers, etc.
+
+  // Metadata
+  width  Int?
+  height Int?
+  size   Int?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([category])
+}
+
+model Template {
+  id   String @id @default(cuid())
+  name String
+  slug String
+
+  // Organization
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Template data
+  format       String // instagram_feed, tiktok_video, etc.
+  canvasConfig Json
+
+  // Cover image
+  thumbnail String?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+model Export {
+  id   String @id @default(cuid())
+
+  // Design
+  designId String
+  design   Design @relation(fields: [designId], references: [id], onDelete: Cascade)
+
+  // Format & settings
+  format     String // png, jpg, pdf, svg, mp4, webm
+  quality    String @default("high") // low, medium, high, ultra
+  settings   Json @default("{}")
+
+  // Status
+  status String @default("pending") // pending, processing, completed, failed
+  progress Int @default(0) // 0-100
+
+  // Output
+  fileUrl       String?
+  downloadToken String?
+  expiresAt     DateTime?
+  fileSize      Int?
+
+  // Error tracking
+  errorMessage String?
+
+  // Job tracking
+  jobId String?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([designId])
+  @@index([status])
+  @@index([jobId])
+}
+
+// ============================================================================
+// AI AGENT SYSTEM
+// ============================================================================
+
+model AgentExecution {
+  id   String @id @default(cuid())
+
+  // Agent info
+  agentName String
+  agentType String // CREATIVE_DIRECTOR, DESIGN_GENERATOR, etc.
+
+  // Design
+  designId String
+  design   Design @relation(fields: [designId], references: [id], onDelete: Cascade)
+
+  // Input & output
+  input  Json
+  output Json?
+
+  // Status
+  status String @default("pending") // pending, running, completed, failed
+  error  String?
+
+  // LLM usage
+  inputTokens  Int @default(0)
+  outputTokens Int @default(0)
+  totalCost    Float @default(0.0) // in dollars
+
+  // Timing
+  durationMs Int?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([designId])
+  @@index([agentName])
+  @@index([status])
+}
+
+model AgentLog {
+  id   String @id @default(cuid())
+
+  // Agent
+  agentName String
+  agentType String
+
+  // Log data
+  level      String // info, warn, error, debug
+  message    String
+  metadata   Json @default("{}")
+
+  // Timestamps
+  createdAt DateTime @default(now())
+
+  @@index([agentName])
+  @@index([level])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// ANALYTICS & METRICS
+// ============================================================================
+
+model DesignMetrics {
+  id   String @id @default(cuid())
+
+  // Design
+  designId String @unique
+  design   Design @relation(fields: [designId], references: [id], onDelete: Cascade)
+
+  // Engagement
+  views       Int @default(0)
+  downloads   Int @default(0)
+  shares      Int @default(0)
+  comments    Int @default(0)
+
+  // Performance
+  avgRatingScore Float? // 1-5 scale
+  favoriteCount  Int @default(0)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DesignComment {
+  id   String @id @default(cuid())
+
+  // Author
+  authorId String
+  author   User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  // Design
+  designId String
+  design   Design @relation(fields: [designId], references: [id], onDelete: Cascade)
+
+  // Content
+  text String
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([designId])
+  @@index([authorId])
+}
+
+// ============================================================================
+// ACTIVITY LOGGING
+// ============================================================================
+
+model ActivityLog {
+  id   String @id @default(cuid())
+
+  // User
+  userId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Action
+  action      String // design_created, design_exported, agent_run, etc.
+  resourceId  String?
+  resourceType String?
+
+  // Metadata
+  metadata Json @default("{}")
+
+  // Timestamps
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+}

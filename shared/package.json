@@ -1,0 +1,8 @@
+{
+  "name": "corex-design-studio-shared",
+  "version": "0.1.0",
+  "description": "Shared types and utilities",
+  "private": true,
+  "main": "index.ts",
+  "types": "types/index.ts"
+}

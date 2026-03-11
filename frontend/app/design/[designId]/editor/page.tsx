@@ -2,7 +2,12 @@
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { AIChatBot } from '../../../components/AIChatBot';
+import dynamic from 'next/dynamic';
+
+const VideoPreview = dynamic(
+  () => import('./components/VideoPreview').then(mod => ({ default: mod.VideoPreview })),
+  { ssr: false, loading: () => <div className="flex items-center justify-center h-full bg-gray-900 text-white text-sm">Loading Remotion Player...</div> }
+);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -27,6 +32,39 @@ type ToolType =
 
 type ElementType = 'text' | 'rect' | 'circle' | 'line' | 'polygon' | 'star';
 type BlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten' | 'color-dodge' | 'color-burn' | 'soft-light' | 'hard-light' | 'difference' | 'exclusion';
+
+type AnimationType = 'none' | 'fadeIn' | 'fadeOut' | 'slideLeft' | 'slideRight' | 'slideUp' | 'slideDown' | 'scaleIn' | 'scaleOut' | 'bounceIn' | 'rotateIn' | 'typewriter' | 'blur';
+
+type KeyframeProperty = 'x' | 'y' | 'opacity' | 'rotation' | 'scaleX' | 'scaleY' | 'blur';
+
+interface Keyframe {
+  id: string;
+  time: number; // seconds relative to element start
+  property: KeyframeProperty;
+  value: number;
+  easing: 'linear' | 'ease' | 'ease-in' | 'ease-out' | 'ease-in-out';
+}
+
+interface ElementAnimation {
+  enterAnimation: AnimationType;
+  exitAnimation: AnimationType;
+  enterDuration: number; // seconds
+  exitDuration: number;
+  startTime: number; // seconds on timeline
+  duration: number; // how long element is visible (seconds)
+  easing: 'linear' | 'ease' | 'ease-in' | 'ease-out' | 'ease-in-out';
+  keyframes: Keyframe[];
+}
+
+const KEYFRAME_PROPERTIES: { value: KeyframeProperty; label: string; min: number; max: number; defaultVal: number }[] = [
+  { value: 'x', label: 'Position X', min: -2000, max: 4000, defaultVal: 0 },
+  { value: 'y', label: 'Position Y', min: -2000, max: 4000, defaultVal: 0 },
+  { value: 'opacity', label: 'Opacity', min: 0, max: 100, defaultVal: 100 },
+  { value: 'rotation', label: 'Rotation', min: -360, max: 360, defaultVal: 0 },
+  { value: 'scaleX', label: 'Scale X', min: 0, max: 500, defaultVal: 100 },
+  { value: 'scaleY', label: 'Scale Y', min: 0, max: 500, defaultVal: 100 },
+  { value: 'blur', label: 'Blur', min: 0, max: 50, defaultVal: 0 },
+];
 
 interface CanvasElement {
   id: string;
@@ -59,7 +97,34 @@ interface CanvasElement {
   colour?: string;
   name: string;
   points?: number;
+  backgroundImage?: string;
 }
+
+const ANIMATION_OPTIONS: { value: AnimationType; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'fadeIn', label: 'Fade In' },
+  { value: 'fadeOut', label: 'Fade Out' },
+  { value: 'slideLeft', label: 'Slide Left' },
+  { value: 'slideRight', label: 'Slide Right' },
+  { value: 'slideUp', label: 'Slide Up' },
+  { value: 'slideDown', label: 'Slide Down' },
+  { value: 'scaleIn', label: 'Scale In' },
+  { value: 'scaleOut', label: 'Scale Out' },
+  { value: 'bounceIn', label: 'Bounce In' },
+  { value: 'rotateIn', label: 'Rotate In' },
+  { value: 'blur', label: 'Blur In' },
+];
+
+const DEFAULT_ANIMATION: ElementAnimation = {
+  enterAnimation: 'none',
+  exitAnimation: 'none',
+  enterDuration: 0.5,
+  exitDuration: 0.5,
+  startTime: 0,
+  duration: 3,
+  easing: 'ease-out',
+  keyframes: [],
+};
 
 interface Toast {
   id: string;
@@ -632,13 +697,16 @@ export default function DesignEditorPage() {
     'seo-optimizer': { name: 'SEO Optimizer', icon: '🔍', category: 'Analysis', greeting: 'I\'m your SEO Optimizer. I\'ll help optimise this design for search visibility with alt text, metadata, and structured markup.' },
   };
 
-  const activeAgent = agentParam && AGENTS[agentParam] ? AGENTS[agentParam] : null;
+  const activeAgent = agentParam && AGENTS[agentParam]
+    ? AGENTS[agentParam]
+    : { name: 'AI Assistant', icon: '🤖', category: 'General', greeting: "Hey! I'm your COREX AI Assistant. I can help you design, write copy, optimise layouts, and even modify your canvas directly. Tell me what you're working on and I'll help bring it to life." };
 
   // ── State ──
-  const [designName, setDesignName] = useState('Untitled Design');
+  const initialName = searchParams.get('name') || 'Untitled Design';
+  const [designName, setDesignName] = useState(initialName);
   const [isEditingName, setIsEditingName] = useState(false);
   const [activeTool, setActiveTool] = useState<ToolType>('select');
-  const [elements, setElements] = useState<readonly CanvasElement[]>(createDemoElements);
+  const [elements, setElements] = useState<readonly CanvasElement[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [layersPanelOpen, setLayersPanelOpen] = useState(true);
@@ -648,6 +716,26 @@ export default function DesignEditorPage() {
   const [zoom, setZoom] = useState(100);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [resizeState, setResizeState] = useState<ResizeState | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playingElementIndex, setPlayingElementIndex] = useState(-1);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Video Editor state ──
+  const isVideoMode = agentParam === 'video-adapter';
+  const [elementAnimations, setElementAnimations] = useState<Record<string, ElementAnimation>>({});
+  const [totalDuration, setTotalDuration] = useState(10);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [keyframePanel, setKeyframePanel] = useState(false);
+  const [timelineZoom, setTimelineZoom] = useState(1); // 1x = fit, 2x = zoomed in
+  const [snapToGrid, setSnapToGrid] = useState(false);
+  const [gridSize, setGridSize] = useState(10);
+  const [remotionPreview, setRemotionPreview] = useState(false);
+  const playbackRef = useRef<number | null>(null);
+  const lastFrameRef = useRef<number>(0);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const rulerRef = useRef<HTMLDivElement>(null);
 
   // Agent chat state
   const [agentChatOpen, setAgentChatOpen] = useState(!!activeAgent);
@@ -655,6 +743,32 @@ export default function DesignEditorPage() {
   const [agentInput, setAgentInput] = useState('');
   const [agentTyping, setAgentTyping] = useState(false);
   const agentChatEndRef = useRef<HTMLDivElement>(null);
+
+  // ── Load saved design on mount ──
+  useEffect(() => {
+    const saved = localStorage.getItem(`corex-design-${designId}`);
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        if (data.elements && Array.isArray(data.elements)) {
+          setElements(data.elements);
+        }
+        if (data.name) {
+          setDesignName(data.name);
+        }
+        if (data.elementAnimations && typeof data.elementAnimations === 'object') {
+          setElementAnimations(data.elementAnimations);
+        }
+        if (data.totalDuration && typeof data.totalDuration === 'number') {
+          setTotalDuration(data.totalDuration);
+        }
+      } catch {
+        setElements(createDemoElements());
+      }
+    } else {
+      setElements(createDemoElements());
+    }
+  }, [designId]);
 
   // Collapsible sections
   const [sectionsCollapsed, setSectionsCollapsed] = useState<Record<string, boolean>>({});
@@ -677,6 +791,47 @@ export default function DesignEditorPage() {
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 2500);
   }, []);
+
+  // ── Image upload handler ──
+  const handleImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      showToast('Please select an image file', 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = Math.min(canvasWidth * 0.8, canvasHeight * 0.8);
+        const scale = Math.min(maxDim / img.width, maxDim / img.height, 1);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const x = Math.round((canvasWidth - w) / 2);
+        const y = Math.round((canvasHeight - h) / 2);
+
+        const newEl = createDefaultElement({
+          type: 'rect',
+          x, y, width: w, height: h,
+          fill: '#f0f0f0',
+          stroke: 'none',
+          strokeWidth: 0,
+          name: file.name.replace(/\.[^.]+$/, ''),
+        });
+        (newEl as any).backgroundImage = dataUrl;
+        setElements((prev) => [...prev, newEl]);
+        setSelectedId(newEl.id);
+        showToast('Image added to canvas');
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  }, [canvasWidth, canvasHeight, showToast]);
 
   // ── Close export on outside click ──
   useEffect(() => {
@@ -728,7 +883,11 @@ export default function DesignEditorPage() {
       setElements((prev) =>
         prev.map((el) =>
           el.id === dragState.elementId
-            ? { ...el, x: Math.round(dragState.elementStartX + dx), y: Math.round(dragState.elementStartY + dy) }
+            ? {
+                ...el,
+                x: snapToGrid ? Math.round((dragState.elementStartX + dx) / gridSize) * gridSize : Math.round(dragState.elementStartX + dx),
+                y: snapToGrid ? Math.round((dragState.elementStartY + dy) / gridSize) * gridSize : Math.round(dragState.elementStartY + dy),
+              }
             : el
         )
       );
@@ -744,7 +903,7 @@ export default function DesignEditorPage() {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragState, zoom]);
+  }, [dragState, zoom, snapToGrid, gridSize]);
 
   // ── Resize ──
   const handleResizeStart = useCallback(
@@ -770,10 +929,15 @@ export default function DesignEditorPage() {
     if (!resizeState) return;
     const { elementId, direction, startX, startY, elementStartX, elementStartY, elementStartW, elementStartH } = resizeState;
     const scale = zoom / 100;
+    const aspectRatio = elementStartW / elementStartH;
+
+    const snap = (val: number) => snapToGrid ? Math.round(val / gridSize) * gridSize : Math.round(val);
 
     const handleMouseMove = (e: MouseEvent) => {
       const dx = (e.clientX - startX) / scale;
       const dy = (e.clientY - startY) / scale;
+      const isCorner = direction.length === 2; // 'nw','ne','sw','se'
+      const holdShift = e.shiftKey;
 
       setElements((prev) =>
         prev.map((el) => {
@@ -788,7 +952,18 @@ export default function DesignEditorPage() {
           if (direction.includes('s')) { newH = Math.max(20, elementStartH + dy); }
           if (direction.includes('n')) { newH = Math.max(20, elementStartH - dy); newY = elementStartY + (elementStartH - newH); }
 
-          return { ...el, x: Math.round(newX), y: Math.round(newY), width: Math.round(newW), height: Math.round(newH) };
+          // Proportional scaling when Shift held on corner handles
+          if (holdShift && isCorner) {
+            const wRatio = newW / elementStartW;
+            const hRatio = newH / elementStartH;
+            const ratio = Math.max(wRatio, hRatio);
+            newW = Math.max(20, elementStartW * ratio);
+            newH = Math.max(20, newW / aspectRatio);
+            if (direction.includes('w')) newX = elementStartX + elementStartW - newW;
+            if (direction.includes('n')) newY = elementStartY + elementStartH - newH;
+          }
+
+          return { ...el, x: snap(newX), y: snap(newY), width: snap(newW), height: snap(newH) };
         })
       );
     };
@@ -801,7 +976,7 @@ export default function DesignEditorPage() {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [resizeState, zoom]);
+  }, [resizeState, zoom, snapToGrid, gridSize]);
 
   // ── Canvas Click (add elements) ──
   const handleCanvasClick = useCallback(
@@ -886,6 +1061,13 @@ export default function DesignEditorPage() {
         return;
       }
 
+      if (activeTool === 'image') {
+        // Trigger file picker
+        imageInputRef.current?.click();
+        setActiveTool('select');
+        return;
+      }
+
       // Deselect on empty canvas
       setSelectedId(null);
     },
@@ -934,12 +1116,373 @@ export default function DesignEditorPage() {
     });
   }, []);
 
-  const handleSave = useCallback(() => { showToast('Design saved!'); }, [showToast]);
+  const handleSave = useCallback(() => {
+    const data = {
+      name: designName,
+      elements: [...elements],
+      canvasWidth,
+      canvasHeight,
+      elementAnimations: { ...elementAnimations },
+      totalDuration,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(`corex-design-${designId}`, JSON.stringify(data));
+    // Also save to the designs list so project page can show the name
+    const designsList = JSON.parse(localStorage.getItem('corex-designs-list') || '{}');
+    designsList[designId] = { name: designName, updatedAt: data.savedAt, dimensions: `${canvasWidth}x${canvasHeight}` };
+    localStorage.setItem('corex-designs-list', JSON.stringify(designsList));
+    showToast('Design saved!');
+  }, [showToast, designName, elements, canvasWidth, canvasHeight, designId, elementAnimations, totalDuration]);
+
   const handleExport = useCallback((format: string) => {
     setExportDropdownOpen(false);
     showToast('Exporting...', 'info');
-    setTimeout(() => showToast(`${format.toUpperCase()} export ready!`), 1500);
-  }, [showToast]);
+
+    // Render the canvas to an image and trigger download
+    setTimeout(() => {
+      const canvasEl = canvasRef.current;
+      if (!canvasEl) {
+        showToast('Export failed — canvas not found', 'error');
+        return;
+      }
+
+      import('html2canvas').then(({ default: html2canvas }) => {
+        html2canvas(canvasEl, {
+          backgroundColor: '#ffffff',
+          scale: 2,
+          width: canvasWidth,
+          height: canvasHeight,
+          useCORS: true,
+        }).then((canvas) => {
+          const mimeMap: Record<string, string> = {
+            'PNG': 'image/png',
+            'JPG': 'image/jpeg',
+            'WebP': 'image/webp',
+          };
+          const mime = mimeMap[format] || 'image/png';
+          const ext = format.toLowerCase();
+
+          if (format === 'SVG') {
+            // SVG export — create SVG markup from elements
+            const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">
+  <rect width="${canvasWidth}" height="${canvasHeight}" fill="white"/>
+  <text x="${canvasWidth/2}" y="${canvasHeight/2}" text-anchor="middle" font-size="24" fill="#666">SVG Export — ${designName}</text>
+</svg>`;
+            const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${designName.replace(/\s+/g, '-').toLowerCase()}.svg`;
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast(`SVG saved to your Downloads folder`);
+            return;
+          }
+
+          if (format === 'PDF') {
+            // PDF export using canvas data
+            canvas.toBlob((blob) => {
+              if (!blob) return;
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${designName.replace(/\s+/g, '-').toLowerCase()}.png`;
+              a.click();
+              URL.revokeObjectURL(url);
+              showToast(`PDF export saved as PNG to your Downloads folder`);
+            }, 'image/png');
+            return;
+          }
+
+          canvas.toBlob((blob) => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${designName.replace(/\s+/g, '-').toLowerCase()}.${ext}`;
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast(`${format} saved to your Downloads folder`);
+          }, mime, format === 'JPG' ? 0.92 : undefined);
+        }).catch(() => {
+          showToast('Export failed — rendering error', 'error');
+        });
+      }).catch(() => {
+        // Fallback: simple canvas export
+        const canvas = document.createElement('canvas');
+        canvas.width = canvasWidth;
+        canvas.height = canvasHeight;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+          ctx.fillStyle = '#666666';
+          ctx.font = '24px Inter, system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(designName, canvasWidth / 2, canvasHeight / 2);
+        }
+        canvas.toBlob((blob) => {
+          if (!blob) return;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${designName.replace(/\s+/g, '-').toLowerCase()}.png`;
+          a.click();
+          URL.revokeObjectURL(url);
+          showToast(`PNG saved to your Downloads folder`);
+        });
+      });
+    }, 100);
+  }, [showToast, canvasWidth, canvasHeight, designName]);
+
+  // ── Animation helpers ──
+  const getAnimation = useCallback((elId: string): ElementAnimation => {
+    return elementAnimations[elId] || DEFAULT_ANIMATION;
+  }, [elementAnimations]);
+
+  const updateAnimation = useCallback((elId: string, updates: Partial<ElementAnimation>) => {
+    setElementAnimations(prev => ({
+      ...prev,
+      [elId]: { ...(prev[elId] || DEFAULT_ANIMATION), ...updates },
+    }));
+  }, []);
+
+  const addKeyframe = useCallback((elId: string, property: KeyframeProperty, time: number, value: number) => {
+    setElementAnimations(prev => {
+      const anim = prev[elId] || DEFAULT_ANIMATION;
+      const newKf: Keyframe = { id: `kf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, time, property, value, easing: 'ease' };
+      const updated = [...anim.keyframes.filter(k => !(k.property === property && Math.abs(k.time - time) < 0.05)), newKf].sort((a, b) => a.time - b.time);
+      return { ...prev, [elId]: { ...anim, keyframes: updated } };
+    });
+  }, []);
+
+  const removeKeyframe = useCallback((elId: string, kfId: string) => {
+    setElementAnimations(prev => {
+      const anim = prev[elId] || DEFAULT_ANIMATION;
+      return { ...prev, [elId]: { ...anim, keyframes: anim.keyframes.filter(k => k.id !== kfId) } };
+    });
+  }, []);
+
+  const updateKeyframe = useCallback((elId: string, kfId: string, updates: Partial<Keyframe>) => {
+    setElementAnimations(prev => {
+      const anim = prev[elId] || DEFAULT_ANIMATION;
+      return { ...prev, [elId]: { ...anim, keyframes: anim.keyframes.map(k => k.id === kfId ? { ...k, ...updates } : k) } };
+    });
+  }, []);
+
+  // Interpolate keyframe value at a given time
+  const interpolateKeyframes = useCallback((keyframes: Keyframe[], property: KeyframeProperty, time: number, defaultValue: number): number => {
+    const propKfs = keyframes.filter(k => k.property === property).sort((a, b) => a.time - b.time);
+    if (propKfs.length === 0) return defaultValue;
+    if (time <= propKfs[0].time) return propKfs[0].value;
+    if (time >= propKfs[propKfs.length - 1].time) return propKfs[propKfs.length - 1].value;
+    for (let i = 0; i < propKfs.length - 1; i++) {
+      const a = propKfs[i], b = propKfs[i + 1];
+      if (time >= a.time && time <= b.time) {
+        const t = (time - a.time) / (b.time - a.time);
+        return a.value + (b.value - a.value) * t; // Linear interp
+      }
+    }
+    return defaultValue;
+  }, []);
+
+  // Timeline scrub handler
+  const scrubToPosition = useCallback((clientX: number, container: HTMLElement) => {
+    const rect = container.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const pct = Math.max(0, Math.min(1, x / rect.width));
+    setCurrentTime(pct * totalDuration);
+  }, [totalDuration]);
+
+  // Scrub drag handlers
+  useEffect(() => {
+    if (!isScrubbing) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const container = timelineRef.current || rulerRef.current;
+      if (container) scrubToPosition(e.clientX, container);
+    };
+    const handleMouseUp = () => setIsScrubbing(false);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isScrubbing, scrubToPosition]);
+
+  // Auto-assign staggered start times for new elements in video mode
+  useEffect(() => {
+    if (!isVideoMode) return;
+    const updated = { ...elementAnimations };
+    let changed = false;
+    elements.forEach((el, i) => {
+      if (!updated[el.id]) {
+        const start = Math.min(i * 0.8, totalDuration - 1);
+        updated[el.id] = {
+          ...DEFAULT_ANIMATION,
+          startTime: start,
+          enterAnimation: 'fadeIn',
+          duration: Math.max(1, totalDuration - start),
+          keyframes: [],
+        };
+        changed = true;
+      }
+    });
+    // Also clean up animations for deleted elements
+    const elementIds = new Set(elements.map(e => e.id));
+    for (const id of Object.keys(updated)) {
+      if (!elementIds.has(id)) {
+        delete updated[id];
+        changed = true;
+      }
+    }
+    if (changed) setElementAnimations(updated);
+  }, [isVideoMode, elements, totalDuration]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Video Playback Engine ──
+  const stopPlayback = useCallback(() => {
+    if (playbackRef.current) {
+      cancelAnimationFrame(playbackRef.current);
+      playbackRef.current = null;
+    }
+    setIsPlaying(false);
+  }, []);
+
+  const startPlayback = useCallback(() => {
+    if (elements.length === 0) return;
+    setIsPlaying(true);
+    setSelectedId(null);
+    lastFrameRef.current = performance.now();
+
+    const tick = (now: number) => {
+      const delta = (now - lastFrameRef.current) / 1000;
+      lastFrameRef.current = now;
+      setCurrentTime(prev => {
+        const next = prev + delta * playbackSpeed;
+        if (next >= totalDuration) {
+          stopPlayback();
+          return totalDuration;
+        }
+        return next;
+      });
+      playbackRef.current = requestAnimationFrame(tick);
+    };
+    playbackRef.current = requestAnimationFrame(tick);
+  }, [elements.length, playbackSpeed, totalDuration, stopPlayback]);
+
+  const togglePlayback = useCallback(() => {
+    if (isPlaying) {
+      stopPlayback();
+    } else {
+      if (currentTime >= totalDuration) setCurrentTime(0);
+      startPlayback();
+    }
+  }, [isPlaying, currentTime, totalDuration, stopPlayback, startPlayback]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (playbackRef.current) cancelAnimationFrame(playbackRef.current);
+    };
+  }, []);
+
+  // Get element visibility/animation state at a given time
+  const getElementPlayState = useCallback((elId: string, time: number) => {
+    const anim = getAnimation(elId);
+    const { startTime, duration, enterAnimation, exitAnimation, enterDuration, exitDuration } = anim;
+    const endTime = startTime + duration;
+
+    if (time < startTime || time > endTime) return { visible: false, opacity: 0, transform: '', filter: '' };
+
+    const elapsed = time - startTime;
+    const remaining = endTime - time;
+    let opacity = 1;
+    let transform = '';
+    let filter = '';
+
+    // Enter animation
+    if (elapsed < enterDuration && enterAnimation !== 'none') {
+      const progress = elapsed / enterDuration;
+      const eased = progress; // Simple linear for now
+      switch (enterAnimation) {
+        case 'fadeIn': opacity = eased; break;
+        case 'slideLeft': transform = `translateX(${(1 - eased) * 100}px)`; opacity = eased; break;
+        case 'slideRight': transform = `translateX(${(eased - 1) * 100}px)`; opacity = eased; break;
+        case 'slideUp': transform = `translateY(${(1 - eased) * 60}px)`; opacity = eased; break;
+        case 'slideDown': transform = `translateY(${(eased - 1) * 60}px)`; opacity = eased; break;
+        case 'scaleIn': transform = `scale(${0.3 + eased * 0.7})`; opacity = eased; break;
+        case 'bounceIn': {
+          const bounce = eased < 0.6 ? eased / 0.6 : 1 + Math.sin((eased - 0.6) * Math.PI * 2.5) * 0.15 * (1 - eased);
+          transform = `scale(${bounce})`;
+          opacity = Math.min(eased * 2, 1);
+          break;
+        }
+        case 'rotateIn': transform = `rotate(${(1 - eased) * 90}deg) scale(${0.5 + eased * 0.5})`; opacity = eased; break;
+        case 'blur': filter = `blur(${(1 - eased) * 10}px)`; opacity = eased; break;
+        default: break;
+      }
+    }
+
+    // Exit animation
+    if (remaining < exitDuration && exitAnimation !== 'none') {
+      const progress = remaining / exitDuration;
+      switch (exitAnimation) {
+        case 'fadeOut': opacity = progress; break;
+        case 'scaleOut': transform = `scale(${progress})`; opacity = progress; break;
+        case 'slideLeft': transform = `translateX(${(progress - 1) * 100}px)`; opacity = progress; break;
+        case 'slideRight': transform = `translateX(${(1 - progress) * 100}px)`; opacity = progress; break;
+        case 'slideUp': transform = `translateY(${(progress - 1) * 60}px)`; opacity = progress; break;
+        case 'slideDown': transform = `translateY(${(1 - progress) * 60}px)`; opacity = progress; break;
+        case 'blur': filter = `blur(${(1 - progress) * 10}px)`; opacity = progress; break;
+        default: break;
+      }
+    }
+
+    // Apply keyframe overrides
+    if (anim.keyframes.length > 0) {
+      const kfTime = elapsed; // relative to element start
+      const kfOpacity = interpolateKeyframes(anim.keyframes, 'opacity', kfTime, -1);
+      if (kfOpacity >= 0) opacity = kfOpacity / 100;
+      const kfRotation = interpolateKeyframes(anim.keyframes, 'rotation', kfTime, NaN);
+      const kfScaleX = interpolateKeyframes(anim.keyframes, 'scaleX', kfTime, NaN);
+      const kfScaleY = interpolateKeyframes(anim.keyframes, 'scaleY', kfTime, NaN);
+      const kfBlur = interpolateKeyframes(anim.keyframes, 'blur', kfTime, NaN);
+      const kfX = interpolateKeyframes(anim.keyframes, 'x', kfTime, NaN);
+      const kfY = interpolateKeyframes(anim.keyframes, 'y', kfTime, NaN);
+
+      const transforms: string[] = [];
+      if (!isNaN(kfX)) transforms.push(`translateX(${kfX}px)`);
+      if (!isNaN(kfY)) transforms.push(`translateY(${kfY}px)`);
+      if (!isNaN(kfRotation)) transforms.push(`rotate(${kfRotation}deg)`);
+      if (!isNaN(kfScaleX) || !isNaN(kfScaleY)) transforms.push(`scale(${(isNaN(kfScaleX) ? 100 : kfScaleX) / 100}, ${(isNaN(kfScaleY) ? 100 : kfScaleY) / 100})`);
+      if (transforms.length > 0) transform = (transform ? transform + ' ' : '') + transforms.join(' ');
+      if (!isNaN(kfBlur)) filter = (filter ? filter + ' ' : '') + `blur(${kfBlur}px)`;
+    }
+
+    return { visible: true, opacity, transform, filter };
+  }, [getAnimation, interpolateKeyframes]);
+
+  // ── Preview / Play animation (simple mode for non-video) ──
+  const handlePlay = useCallback(() => {
+    if (isVideoMode) { togglePlayback(); return; }
+    if (isPlaying || elements.length === 0) return;
+    setIsPlaying(true);
+    setPlayingElementIndex(-1);
+    setSelectedId(null);
+
+    let idx = 0;
+    const interval = setInterval(() => {
+      setPlayingElementIndex(idx);
+      idx++;
+      if (idx >= elements.length) {
+        clearInterval(interval);
+        setTimeout(() => {
+          setIsPlaying(false);
+          setPlayingElementIndex(-1);
+        }, 2000);
+      }
+    }, 600);
+  }, [isPlaying, elements.length, isVideoMode, togglePlayback]);
 
   // ── Tool definitions ──
   const toolGroups: { label: string; tools: { type: ToolType; label: string; Icon: () => React.JSX.Element; shortcut?: string }[] }[] = [
@@ -1003,6 +1546,10 @@ export default function DesignEditorPage() {
         h: 'hand', z: 'zoom', i: 'image',
       };
       if (shortcutMap[key]) {
+        if (key === 'i') {
+          imageInputRef.current?.click();
+          return;
+        }
         setActiveTool(shortcutMap[key]);
         return;
       }
@@ -1024,9 +1571,7 @@ export default function DesignEditorPage() {
 
   // ── Agent chat: greeting on mount ──
   useEffect(() => {
-    if (activeAgent) {
-      setAgentMessages([{ id: uid(), role: 'agent', text: activeAgent.greeting }]);
-    }
+    setAgentMessages([{ id: uid(), role: 'agent', text: activeAgent.greeting }]);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Agent chat: auto-scroll ──
@@ -1080,36 +1625,184 @@ export default function DesignEditorPage() {
     return `I've analysed your request. Here are my recommendations for your ${canvas.width}x${canvas.height} design with ${canvas.elementCount} element${canvas.elementCount !== 1 ? 's' : ''}:\n\n1. Review the current layout for balance and hierarchy\n2. Ensure colour contrast meets accessibility standards\n3. Test the design at actual viewing size\n\nTell me more about what specific changes you'd like and I'll provide detailed guidance.`;
   }, [canvasWidth, canvasHeight, elements.length]);
 
+  // ── Parse AI actions from response ──
+  const parseAndApplyActions = useCallback((text: string) => {
+    const jsonMatch = text.match(/```json\s*([\s\S]*?)```/);
+    if (!jsonMatch) return;
+    try {
+      const parsed = JSON.parse(jsonMatch[1]);
+      if (!parsed.actions || !Array.isArray(parsed.actions)) return;
+
+      for (const action of parsed.actions) {
+        if (action.type === 'addElement' && action.element) {
+          const newEl = createDefaultElement({ ...action.element, id: uid() });
+          setElements((prev) => [...prev, newEl]);
+        } else if (action.type === 'updateElement' && action.elementId && action.updates) {
+          setElements((prev) =>
+            prev.map((el) => el.id === action.elementId ? { ...el, ...action.updates } : el)
+          );
+        } else if (action.type === 'deleteElement' && action.elementId) {
+          setElements((prev) => prev.filter((el) => el.id !== action.elementId));
+        }
+      }
+      showToast('AI applied changes to canvas');
+    } catch {
+      // JSON parse failed — no actions to apply
+    }
+  }, [showToast]);
+
   const handleAgentSend = useCallback(() => {
     const trimmed = agentInput.trim();
-    if (!trimmed || agentTyping || !agentParam) return;
+    if (!trimmed || agentTyping) return;
 
     const userMsg = { id: uid(), role: 'user' as const, text: trimmed };
     setAgentMessages((prev) => [...prev, userMsg]);
     setAgentInput('');
     setAgentTyping(true);
 
-    setTimeout(() => {
-      const reply = getAgentResponse(agentParam, trimmed);
-      setAgentMessages((prev) => [...prev, { id: uid(), role: 'agent', text: reply }]);
-      setAgentTyping(false);
-    }, 800 + Math.random() * 1200);
-  }, [agentInput, agentTyping, agentParam, getAgentResponse]);
+    // Build message history for API
+    const allMsgs = [...agentMessages, userMsg];
+    const apiMessages = allMsgs.map((m) => ({
+      role: m.role === 'agent' ? 'assistant' as const : 'user' as const,
+      content: m.text,
+    }));
+
+    // Canvas context for AI
+    const canvasData = {
+      width: canvasWidth,
+      height: canvasHeight,
+      elementCount: elements.length,
+      elements: elements.map((el) => ({
+        id: el.id,
+        type: el.type,
+        name: el.name,
+        x: el.x,
+        y: el.y,
+        width: el.width,
+        height: el.height,
+        content: el.content,
+        fill: el.fill,
+        colour: el.colour,
+        fontSize: el.fontSize,
+        fontFamily: el.fontFamily,
+      })),
+    };
+
+    const agentContext = activeAgent
+      ? `The user is working with the ${activeAgent.name} (${activeAgent.category}) agent. Focus your responses on ${activeAgent.category.toLowerCase()} tasks.`
+      : 'The user is in the design editor.';
+
+    // Call Claude API
+    fetch('/api/ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: apiMessages,
+        context: agentContext,
+        canvasData,
+      }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Request failed' }));
+          throw new Error(err.error || 'Request failed');
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error('No response stream');
+
+        const decoder = new TextDecoder();
+        let fullText = '';
+        const replyId = uid();
+
+        // Add empty reply message
+        setAgentMessages((prev) => [...prev, { id: replyId, role: 'agent', text: '' }]);
+        setAgentTyping(false);
+
+        const processStream = async () => {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n').filter((l) => l.startsWith('data: '));
+
+            for (const line of lines) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.type === 'text') {
+                  fullText += data.text;
+                  setAgentMessages((prev) =>
+                    prev.map((m) => m.id === replyId ? { ...m, text: fullText } : m)
+                  );
+                }
+                if (data.type === 'done') {
+                  // Check for canvas actions in the response
+                  parseAndApplyActions(fullText);
+                }
+                if (data.type === 'error') {
+                  setAgentMessages((prev) =>
+                    prev.map((m) => m.id === replyId ? { ...m, text: `Error: ${data.error}` } : m)
+                  );
+                }
+              } catch {
+                // Skip malformed events
+              }
+            }
+          }
+        };
+
+        await processStream();
+      })
+      .catch((err) => {
+        // Fallback to local response if API fails
+        const fallbackReply = getAgentResponse(agentParam || 'creative-director', trimmed);
+        setAgentMessages((prev) => [...prev, { id: uid(), role: 'agent', text: fallbackReply }]);
+        setAgentTyping(false);
+      });
+  }, [agentInput, agentTyping, agentMessages, canvasWidth, canvasHeight, elements, activeAgent, agentParam, getAgentResponse, parseAndApplyActions]);
 
   const formatLabel = `${canvasWidth} x ${canvasHeight}px`;
 
   // ── Render element on canvas ──
-  const renderElement = (el: CanvasElement) => {
+  const renderElement = (el: CanvasElement, elIndex: number) => {
     if (!el.visible) return null;
     const isSelected = el.id === selectedId;
+
+    // Video mode: use timeline-based animation
+    let videoStyle: React.CSSProperties = {};
+    let videoHidden = false;
+    if (isVideoMode && isPlaying) {
+      const ps = getElementPlayState(el.id, currentTime);
+      if (!ps.visible) videoHidden = true;
+      videoStyle = {
+        opacity: ps.opacity * (el.opacity / 100),
+        transform: [el.rotation ? `rotate(${el.rotation}deg)` : '', ps.transform].filter(Boolean).join(' ') || undefined,
+        filter: [el.blur ? `blur(${el.blur}px)` : '', ps.filter].filter(Boolean).join(' ') || undefined,
+      };
+    }
+
+    // Simple play mode: elements animate in sequentially (non-video)
+    const isPlayHidden = !isVideoMode && isPlaying && elIndex > playingElementIndex;
+    const isPlayAnimating = !isVideoMode && isPlaying && elIndex === playingElementIndex;
+
     const commonStyle: React.CSSProperties = {
       left: el.x,
       top: el.y,
       width: el.width,
       height: el.height,
-      opacity: el.opacity / 100,
-      transform: el.rotation ? `rotate(${el.rotation}deg)` : undefined,
-      filter: el.blur ? `blur(${el.blur}px)` : undefined,
+      opacity: videoHidden ? 0
+        : isVideoMode && isPlaying ? videoStyle.opacity
+        : isPlayHidden ? 0
+        : isPlayAnimating ? undefined
+        : el.opacity / 100,
+      transform: isVideoMode && isPlaying ? videoStyle.transform
+        : isPlayAnimating ? `${el.rotation ? `rotate(${el.rotation}deg)` : ''} translateY(0)`
+        : el.rotation ? `rotate(${el.rotation}deg)` : undefined,
+      transition: (!isVideoMode && isPlaying) ? 'opacity 0.5s ease-out, transform 0.5s ease-out' : undefined,
+      animation: isPlayAnimating ? 'elementFadeIn 0.5s ease-out forwards' : undefined,
+      filter: isVideoMode && isPlaying ? videoStyle.filter
+        : el.blur ? `blur(${el.blur}px)` : undefined,
       boxShadow: (el.shadowX || el.shadowY || el.shadowBlur)
         ? `${el.shadowX}px ${el.shadowY}px ${el.shadowBlur}px ${el.shadowColor}`
         : undefined,
@@ -1145,6 +1838,7 @@ export default function DesignEditorPage() {
     }
 
     if (el.type === 'rect' || el.type === 'line') {
+      const bgImage = (el as any).backgroundImage;
       return (
         <div
           key={el.id}
@@ -1152,7 +1846,10 @@ export default function DesignEditorPage() {
           onMouseDown={(e) => handleMouseDown(e, el.id)}
           style={{
             ...commonStyle,
-            backgroundColor: el.fill,
+            backgroundColor: bgImage ? undefined : el.fill,
+            backgroundImage: bgImage ? `url(${bgImage})` : undefined,
+            backgroundSize: bgImage ? 'cover' : undefined,
+            backgroundPosition: bgImage ? 'center' : undefined,
             border: el.strokeWidth ? `${el.strokeWidth}px solid ${el.stroke}` : 'none',
             borderRadius: el.borderRadius,
           }}
@@ -1265,6 +1962,33 @@ export default function DesignEditorPage() {
             <span className="text-xs text-neutral-300 font-mono w-12 text-center tabular-nums">{zoom}%</span>
             <button onClick={() => setZoom((z) => clamp(z + 10, 10, 400))} className="px-1.5 py-0.5 text-xs text-neutral-400 hover:text-white hover:bg-neutral-700 rounded transition-colors">+</button>
             <button onClick={() => setZoom(100)} className="px-2 py-0.5 text-[10px] text-neutral-500 hover:text-white hover:bg-neutral-700 rounded transition-colors ml-0.5">FIT</button>
+            <div className="h-5 w-px bg-neutral-700 mx-1" />
+            {/* Snap to grid */}
+            <button
+              onClick={() => setSnapToGrid(!snapToGrid)}
+              className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded transition-colors ${snapToGrid ? 'bg-blue-600 text-white' : 'text-neutral-500 hover:text-white hover:bg-neutral-700'}`}
+              title={`Snap to Grid (${gridSize}px)`}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>
+              Grid
+            </button>
+            <div className="h-5 w-px bg-neutral-700 mx-1" />
+            <button
+              onClick={handlePlay}
+              disabled={isPlaying || elements.length === 0}
+              className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                isPlaying
+                  ? 'bg-green-600 text-white cursor-not-allowed'
+                  : 'hover:bg-neutral-700 text-neutral-400 hover:text-white'
+              }`}
+              title="Preview animation (play)"
+            >
+              {isPlaying ? (
+                <><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="6" height="16" rx="1"/><rect x="14" y="4" width="6" height="16" rx="1"/></svg> Playing</>
+              ) : (
+                <><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg> Play</>
+              )}
+            </button>
           </div>
 
           {/* Right */}
@@ -1284,23 +2008,19 @@ export default function DesignEditorPage() {
               )}
             </div>
             <button onClick={handleSave} className="px-4 py-1.5 text-xs font-semibold rounded bg-orange-500 hover:bg-orange-600 transition-colors">Save</button>
-            {activeAgent && (
-              <>
-                <div className="h-5 w-px bg-neutral-700" />
-                <button
-                  onClick={() => setAgentChatOpen(!agentChatOpen)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors ${
-                    agentChatOpen
-                      ? 'bg-purple-600 hover:bg-purple-700 text-white'
-                      : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300'
-                  }`}
-                  title="Toggle Agent Chat"
-                >
-                  <span>{activeAgent.icon}</span>
-                  <span>{activeAgent.name}</span>
-                </button>
-              </>
-            )}
+            <div className="h-5 w-px bg-neutral-700" />
+            <button
+              onClick={() => setAgentChatOpen(!agentChatOpen)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                agentChatOpen
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
+                  : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300'
+              }`}
+              title="Toggle AI Assistant"
+            >
+              <span>{activeAgent.icon}</span>
+              <span>{activeAgent.name}</span>
+            </button>
           </div>
         </header>
 
@@ -1317,7 +2037,13 @@ export default function DesignEditorPage() {
                   return (
                     <button
                       key={type}
-                      onClick={() => setActiveTool(type)}
+                      onClick={() => {
+                        if (type === 'image') {
+                          imageInputRef.current?.click();
+                          return;
+                        }
+                        setActiveTool(type);
+                      }}
                       title={`${label}${shortcut ? ` (${shortcut})` : ''}`}
                       className={`flex items-center justify-center w-10 h-9 mx-auto rounded-lg transition-all ${
                         isActive
@@ -1400,6 +2126,59 @@ export default function DesignEditorPage() {
                     createDefaultElement({ type: 'text', x: canvasWidth * 0.18 + 60, y: canvasHeight * 0.68, width: 200, height: 22, fill: 'transparent', stroke: 'none', content: 'Jane Smith', fontSize: 16, fontFamily: 'Inter', fontWeight: 600, textAlign: 'left', colour: '#1a1a1a', name: 'Name' }),
                     createDefaultElement({ type: 'text', x: canvasWidth * 0.18 + 60, y: canvasHeight * 0.68 + 26, width: 200, height: 18, fill: 'transparent', stroke: 'none', content: 'CEO, Acme Inc.', fontSize: 13, fontFamily: 'Inter', fontWeight: 400, textAlign: 'left', colour: '#737373', name: 'Title' }),
                   ]},
+                  // ── Format-specific templates ──
+                  ...(canvasHeight > canvasWidth ? [
+                    // Story/Portrait templates
+                    { name: 'Story Announcement', desc: 'Bold story with gradient', gradient: 'from-fuchsia-500 to-violet-500', elements: [
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight, fill: '#0f0f0f', borderRadius: 0, name: 'Background' }),
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight * 0.4, fill: '#7c3aed', borderRadius: 0, opacity: 80, name: 'Gradient Overlay' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.1, y: canvasHeight * 0.12, width: canvasWidth * 0.8, height: 80, fill: 'transparent', stroke: 'none', content: 'BIG NEWS', fontSize: 72, fontFamily: 'Inter', fontWeight: 900, textAlign: 'center', colour: '#ffffff', letterSpacing: 4, name: 'Headline' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.1, y: canvasHeight * 0.22, width: canvasWidth * 0.8, height: 50, fill: 'transparent', stroke: 'none', content: 'Something amazing is coming.\nStay tuned.', fontSize: 20, fontFamily: 'Inter', fontWeight: 400, textAlign: 'center', colour: '#d4d4d4', lineHeight: 1.6, name: 'Body' }),
+                      createDefaultElement({ type: 'rect', x: canvasWidth * 0.25, y: canvasHeight * 0.85, width: canvasWidth * 0.5, height: 56, fill: '#ffffff', borderRadius: 28, name: 'CTA' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.25, y: canvasHeight * 0.85 + 14, width: canvasWidth * 0.5, height: 28, fill: 'transparent', stroke: 'none', content: 'Swipe Up', fontSize: 18, fontFamily: 'Inter', fontWeight: 700, textAlign: 'center', colour: '#0f0f0f', name: 'CTA Text' }),
+                    ]},
+                    { name: 'Story Q&A', desc: 'Interactive question format', gradient: 'from-cyan-500 to-blue-600', elements: [
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight, fill: '#1e293b', borderRadius: 0, name: 'Background' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.1, y: canvasHeight * 0.08, width: canvasWidth * 0.8, height: 30, fill: 'transparent', stroke: 'none', content: 'ASK ME ANYTHING', fontSize: 14, fontFamily: 'Inter', fontWeight: 700, textAlign: 'center', colour: '#38bdf8', letterSpacing: 3, name: 'Label' }),
+                      createDefaultElement({ type: 'rect', x: canvasWidth * 0.08, y: canvasHeight * 0.15, width: canvasWidth * 0.84, height: canvasHeight * 0.25, fill: '#0f172a', borderRadius: 20, name: 'Question Box' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.15, y: canvasHeight * 0.22, width: canvasWidth * 0.7, height: 60, fill: 'transparent', stroke: 'none', content: 'What\'s the one thing you wish you knew before starting?', fontSize: 28, fontFamily: 'Inter', fontWeight: 600, textAlign: 'center', colour: '#ffffff', lineHeight: 1.4, name: 'Question' }),
+                    ]},
+                  ] : []),
+                  ...(canvasWidth > canvasHeight ? [
+                    // Landscape templates (YouTube, LinkedIn, Facebook, etc.)
+                    { name: 'YouTube Thumbnail', desc: 'Eye-catching thumbnail', gradient: 'from-red-500 to-orange-500', elements: [
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight, fill: '#0a0a0a', borderRadius: 0, name: 'Background' }),
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth * 0.55, height: canvasHeight, fill: '#dc2626', borderRadius: 0, name: 'Red Panel' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.04, y: canvasHeight * 0.15, width: canvasWidth * 0.48, height: 100, fill: 'transparent', stroke: 'none', content: 'HOW TO\nMASTER\nTHIS', fontSize: 72, fontFamily: 'Inter', fontWeight: 900, textAlign: 'left', colour: '#ffffff', lineHeight: 1.05, letterSpacing: -1, name: 'Title' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.04, y: canvasHeight * 0.78, width: canvasWidth * 0.48, height: 30, fill: 'transparent', stroke: 'none', content: 'STEP-BY-STEP GUIDE', fontSize: 18, fontFamily: 'Inter', fontWeight: 700, textAlign: 'left', colour: '#fecaca', letterSpacing: 2, name: 'Subtitle' }),
+                      createDefaultElement({ type: 'rect', x: canvasWidth * 0.6, y: canvasHeight * 0.1, width: canvasWidth * 0.35, height: canvasHeight * 0.8, fill: '#262626', borderRadius: 16, name: 'Image Area' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.6, y: canvasHeight * 0.45, width: canvasWidth * 0.35, height: 30, fill: 'transparent', stroke: 'none', content: 'Your Photo', fontSize: 16, fontFamily: 'Inter', fontWeight: 400, textAlign: 'center', colour: '#737373', name: 'Placeholder' }),
+                    ]},
+                    { name: 'LinkedIn Banner', desc: 'Professional profile header', gradient: 'from-blue-600 to-indigo-700', elements: [
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight, fill: '#0a1628', borderRadius: 0, name: 'Background' }),
+                      createDefaultElement({ type: 'rect', x: 0, y: canvasHeight * 0.7, width: canvasWidth, height: canvasHeight * 0.3, fill: '#1e3a5f', borderRadius: 0, name: 'Bottom Strip' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.06, y: canvasHeight * 0.2, width: canvasWidth * 0.5, height: 50, fill: 'transparent', stroke: 'none', content: 'YOUR NAME', fontSize: 48, fontFamily: 'Inter', fontWeight: 800, textAlign: 'left', colour: '#ffffff', letterSpacing: 1, name: 'Name' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.06, y: canvasHeight * 0.5, width: canvasWidth * 0.5, height: 30, fill: 'transparent', stroke: 'none', content: 'Founder & CEO | Building the Future', fontSize: 18, fontFamily: 'Inter', fontWeight: 400, textAlign: 'left', colour: '#93c5fd', name: 'Title' }),
+                      createDefaultElement({ type: 'rect', x: canvasWidth * 0.06, y: canvasHeight * 0.4, width: 60, height: 4, fill: '#3b82f6', borderRadius: 2, name: 'Accent Line' }),
+                    ]},
+                  ] : []),
+                  ...(canvasWidth === canvasHeight ? [
+                    // Square templates (Instagram feed, etc.)
+                    { name: 'Carousel Slide', desc: 'Educational carousel slide', gradient: 'from-emerald-500 to-teal-600', elements: [
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight, fill: '#ffffff', borderRadius: 0, name: 'Background' }),
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight * 0.08, fill: '#059669', borderRadius: 0, name: 'Top Bar' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.08, y: canvasHeight * 0.15, width: canvasWidth * 0.84, height: 40, fill: 'transparent', stroke: 'none', content: 'TIP #1', fontSize: 16, fontFamily: 'Inter', fontWeight: 700, textAlign: 'left', colour: '#059669', letterSpacing: 3, name: 'Label' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.08, y: canvasHeight * 0.25, width: canvasWidth * 0.84, height: 80, fill: 'transparent', stroke: 'none', content: 'Your Key Insight Goes Right Here', fontSize: 42, fontFamily: 'Inter', fontWeight: 800, textAlign: 'left', colour: '#1a1a1a', lineHeight: 1.15, name: 'Heading' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.08, y: canvasHeight * 0.55, width: canvasWidth * 0.84, height: 60, fill: 'transparent', stroke: 'none', content: 'Expand on the insight with a brief explanation that adds value to your audience. Keep it concise and actionable.', fontSize: 18, fontFamily: 'Inter', fontWeight: 400, textAlign: 'left', colour: '#525252', lineHeight: 1.6, name: 'Body' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.08, y: canvasHeight * 0.88, width: canvasWidth * 0.84, height: 20, fill: 'transparent', stroke: 'none', content: 'Swipe for more tips →', fontSize: 14, fontFamily: 'Inter', fontWeight: 600, textAlign: 'center', colour: '#059669', name: 'Swipe CTA' }),
+                    ]},
+                    { name: 'Bold Statement', desc: 'Impact post with strong text', gradient: 'from-yellow-500 to-orange-500', elements: [
+                      createDefaultElement({ type: 'rect', x: 0, y: 0, width: canvasWidth, height: canvasHeight, fill: '#000000', borderRadius: 0, name: 'Background' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.08, y: canvasHeight * 0.3, width: canvasWidth * 0.84, height: 100, fill: 'transparent', stroke: 'none', content: 'STOP\nSCROLLING.', fontSize: 64, fontFamily: 'Inter', fontWeight: 900, textAlign: 'left', colour: '#ffffff', lineHeight: 1.05, letterSpacing: -1, name: 'Main Text' }),
+                      createDefaultElement({ type: 'rect', x: canvasWidth * 0.08, y: canvasHeight * 0.6, width: canvasWidth * 0.3, height: 4, fill: '#F97316', borderRadius: 2, name: 'Accent' }),
+                      createDefaultElement({ type: 'text', x: canvasWidth * 0.08, y: canvasHeight * 0.65, width: canvasWidth * 0.84, height: 40, fill: 'transparent', stroke: 'none', content: 'Read this if you want to level up your brand in 2026.', fontSize: 20, fontFamily: 'Inter', fontWeight: 400, textAlign: 'left', colour: '#a3a3a3', lineHeight: 1.5, name: 'Body' }),
+                    ]},
+                  ] : []),
                   { name: 'Blank Canvas', desc: 'Start from scratch', gradient: 'from-neutral-400 to-neutral-600', elements: [] },
                 ].map((tpl) => (
                   <button
@@ -1412,8 +2191,44 @@ export default function DesignEditorPage() {
                     }}
                     className="group text-left rounded-xl overflow-hidden border border-neutral-800 hover:border-orange-500/50 transition-all hover:shadow-lg hover:shadow-orange-500/10"
                   >
-                    <div className={`h-24 w-full bg-gradient-to-br ${tpl.gradient} relative`}>
-                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all">
+                    <div className="h-32 w-full relative bg-neutral-800 overflow-hidden">
+                      {/* Mini preview of the template */}
+                      {tpl.elements.length > 0 ? (
+                        <div className="absolute inset-0" style={{ transform: `scale(${Math.min(216 / canvasWidth, 128 / canvasHeight)})`, transformOrigin: 'top left' }}>
+                          <div style={{ width: canvasWidth, height: canvasHeight, position: 'relative' }}>
+                            {tpl.elements.map((el, i) => (
+                              <div
+                                key={i}
+                                style={{
+                                  position: 'absolute',
+                                  left: el.x,
+                                  top: el.y,
+                                  width: el.width,
+                                  height: el.height,
+                                  backgroundColor: el.type === 'text' ? undefined : el.fill,
+                                  borderRadius: el.type === 'circle' ? '50%' : el.borderRadius,
+                                  border: el.strokeWidth ? `${el.strokeWidth}px solid ${el.stroke}` : undefined,
+                                  color: el.colour,
+                                  fontSize: el.fontSize,
+                                  fontFamily: el.fontFamily,
+                                  fontWeight: el.fontWeight,
+                                  textAlign: el.textAlign as any,
+                                  letterSpacing: el.letterSpacing ? `${el.letterSpacing}px` : undefined,
+                                  lineHeight: el.lineHeight,
+                                  overflow: 'hidden',
+                                }}
+                              >
+                                {el.type === 'text' && el.content}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="absolute inset-0 flex items-center justify-center text-neutral-600">
+                          <span className="text-xs">Blank Canvas</span>
+                        </div>
+                      )}
+                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all bg-black/40">
                         <span className="px-3 py-1.5 bg-black/70 backdrop-blur-sm text-white text-[10px] font-semibold rounded-lg">Apply Template</span>
                       </div>
                     </div>
@@ -1429,6 +2244,21 @@ export default function DesignEditorPage() {
 
           {/* ── Canvas Area ───────────────────────────────────────────── */}
           <main className="flex-1 overflow-auto flex items-center justify-center bg-neutral-300 relative" style={{ backgroundImage: 'radial-gradient(circle, #d4d4d4 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+            {isVideoMode && remotionPreview ? (
+              <VideoPreview
+                elements={elements}
+                animations={elementAnimations}
+                canvasWidth={canvasWidth}
+                canvasHeight={canvasHeight}
+                totalDuration={totalDuration}
+                fps={30}
+                backgroundColor="#FFFFFF"
+                currentTime={currentTime}
+                isPlaying={isPlaying}
+                onTimeUpdate={(t) => setCurrentTime(t)}
+                onPlayStateChange={(playing) => { if (playing) { startPlayback(); } else { stopPlayback(); } }}
+              />
+            ) : (
             <div
               ref={canvasRef}
               className="relative bg-white shadow-2xl"
@@ -1448,8 +2278,20 @@ export default function DesignEditorPage() {
               }}
               onClick={handleCanvasClick}
             >
-              {elements.map(renderElement)}
+              {/* Grid overlay */}
+              {snapToGrid && (
+                <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ opacity: 0.15 }}>
+                  <defs>
+                    <pattern id="grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
+                      <path d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} fill="none" stroke="#666" strokeWidth="0.5" />
+                    </pattern>
+                  </defs>
+                  <rect width="100%" height="100%" fill="url(#grid)" />
+                </svg>
+              )}
+              {elements.map((el, i) => renderElement(el, i))}
             </div>
+            )}
           </main>
 
           {/* ── Right Properties Panel ────────────────────────────────── */}
@@ -1562,6 +2404,63 @@ export default function DesignEditorPage() {
                       </div>
                     )}
 
+                    {/* Animation (video mode only) */}
+                    {isVideoMode && selectedElement && (
+                      <>
+                        <Divider />
+                        <SectionHeader label="Animation" collapsed={!!sectionsCollapsed.animation} onToggle={() => toggleSection('animation')} />
+                        {!sectionsCollapsed.animation && (() => {
+                          const anim = getAnimation(selectedElement.id);
+                          return (
+                            <div className="flex flex-col gap-2.5 pb-2">
+                              <div>
+                                <label className="text-[11px] text-neutral-500 block mb-0.5">Enter Animation</label>
+                                <select value={anim.enterAnimation} onChange={(e) => updateAnimation(selectedElement.id, { enterAnimation: e.target.value as AnimationType })} className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none">
+                                  {ANIMATION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[11px] text-neutral-500 block mb-0.5">Exit Animation</label>
+                                <select value={anim.exitAnimation} onChange={(e) => updateAnimation(selectedElement.id, { exitAnimation: e.target.value as AnimationType })} className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none">
+                                  {ANIMATION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                </select>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="text-[11px] text-neutral-500 block mb-0.5">Start (s)</label>
+                                  <input type="number" step={0.1} min={0} max={totalDuration} value={anim.startTime} onChange={(e) => updateAnimation(selectedElement.id, { startTime: parseFloat(e.target.value) || 0 })} className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none" />
+                                </div>
+                                <div>
+                                  <label className="text-[11px] text-neutral-500 block mb-0.5">Duration (s)</label>
+                                  <input type="number" step={0.1} min={0.1} max={totalDuration} value={anim.duration} onChange={(e) => updateAnimation(selectedElement.id, { duration: parseFloat(e.target.value) || 1 })} className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none" />
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="text-[11px] text-neutral-500 block mb-0.5">Enter Time (s)</label>
+                                  <input type="number" step={0.1} min={0.1} max={5} value={anim.enterDuration} onChange={(e) => updateAnimation(selectedElement.id, { enterDuration: parseFloat(e.target.value) || 0.5 })} className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none" />
+                                </div>
+                                <div>
+                                  <label className="text-[11px] text-neutral-500 block mb-0.5">Exit Time (s)</label>
+                                  <input type="number" step={0.1} min={0.1} max={5} value={anim.exitDuration} onChange={(e) => updateAnimation(selectedElement.id, { exitDuration: parseFloat(e.target.value) || 0.5 })} className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none" />
+                                </div>
+                              </div>
+                              <div>
+                                <label className="text-[11px] text-neutral-500 block mb-0.5">Easing</label>
+                                <select value={anim.easing} onChange={(e) => updateAnimation(selectedElement.id, { easing: e.target.value as ElementAnimation['easing'] })} className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none">
+                                  <option value="linear">Linear</option>
+                                  <option value="ease">Ease</option>
+                                  <option value="ease-in">Ease In</option>
+                                  <option value="ease-out">Ease Out</option>
+                                  <option value="ease-in-out">Ease In Out</option>
+                                </select>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </>
+                    )}
+
                     {/* Typography (text only) */}
                     {selectedElement.type === 'text' && (
                       <>
@@ -1569,6 +2468,18 @@ export default function DesignEditorPage() {
                         <SectionHeader label="Typography" collapsed={!!sectionsCollapsed.typography} onToggle={() => toggleSection('typography')} />
                         {!sectionsCollapsed.typography && (
                           <div className="flex flex-col gap-2.5 pb-2">
+                            {/* Content first — so user can type immediately */}
+                            <div>
+                              <label className="text-[11px] text-neutral-500 block mb-0.5">Content</label>
+                              <textarea
+                                value={selectedElement.content || ''}
+                                onChange={(e) => updateElement(selectedElement.id, { content: e.target.value })}
+                                rows={3}
+                                className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white resize-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 outline-none transition-colors"
+                                placeholder="Type your text here..."
+                                autoFocus
+                              />
+                            </div>
                             <div>
                               <label className="text-[11px] text-neutral-500 block mb-0.5">Font Family</label>
                               <select
@@ -1613,15 +2524,6 @@ export default function DesignEditorPage() {
                                   </button>
                                 ))}
                               </div>
-                            </div>
-                            <div>
-                              <label className="text-[11px] text-neutral-500 block mb-0.5">Content</label>
-                              <textarea
-                                value={selectedElement.content || ''}
-                                onChange={(e) => updateElement(selectedElement.id, { content: e.target.value })}
-                                rows={3}
-                                className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white resize-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 outline-none transition-colors"
-                              />
                             </div>
                           </div>
                         )}
@@ -1693,7 +2595,7 @@ export default function DesignEditorPage() {
           )}
 
           {/* ── Agent Chat Panel ──────────────────────────────────────── */}
-          {activeAgent && agentChatOpen && (
+          {agentChatOpen && (
             <aside className="w-[320px] bg-neutral-950 border-l border-neutral-800 flex flex-col shrink-0 z-20">
               {/* Header */}
               <div className="flex items-center gap-2 px-3 py-2.5 border-b border-neutral-800 bg-neutral-900">
@@ -1722,16 +2624,23 @@ export default function DesignEditorPage() {
                           : 'bg-neutral-800 text-neutral-200 rounded-bl-md'
                       }`}
                     >
-                      {msg.text.split('\n').map((line, i) => (
-                        <span key={i}>
-                          {line.split(/(\*\*[^*]+\*\*)/).map((part, j) =>
-                            part.startsWith('**') && part.endsWith('**')
-                              ? <strong key={j} className="font-semibold">{part.slice(2, -2)}</strong>
-                              : part
-                          )}
-                          {i < msg.text.split('\n').length - 1 && <br />}
-                        </span>
-                      ))}
+                      {(() => {
+                        // Strip JSON action blocks from display
+                        const cleanText = msg.role === 'agent'
+                          ? msg.text.replace(/```json[\s\S]*?```/g, '').replace(/\n{3,}/g, '\n\n').trim()
+                          : msg.text;
+                        if (!cleanText) return <span className="italic text-neutral-400">Done — changes applied to canvas.</span>;
+                        return cleanText.split('\n').map((line: string, i: number) => (
+                          <span key={i}>
+                            {line.split(/(\*\*[^*]+\*\*)/).map((part: string, j: number) =>
+                              part.startsWith('**') && part.endsWith('**')
+                                ? <strong key={j} className="font-semibold">{part.slice(2, -2)}</strong>
+                                : part
+                            )}
+                            {i < cleanText.split('\n').length - 1 && <br />}
+                          </span>
+                        ));
+                      })()}
                     </div>
                   </div>
                 ))}
@@ -1777,54 +2686,322 @@ export default function DesignEditorPage() {
           )}
         </div>
 
-        {/* ── Bottom Layers Panel ──────────────────────────────────────── */}
-        <footer className={`bg-neutral-900 border-t border-neutral-800 flex flex-col shrink-0 z-20 transition-all ${layersPanelOpen ? 'h-40' : 'h-9'}`}>
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-800">
-            <button onClick={() => setLayersPanelOpen(!layersPanelOpen)} className="flex items-center gap-2 hover:text-orange-400 transition-colors">
-              <IconLayers />
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">Layers</span>
-              <span className={`transition-transform ${layersPanelOpen ? 'rotate-180' : ''}`}><IconChevronDown /></span>
-            </button>
-            <span className="text-[11px] text-neutral-600 ml-auto">{elements.length}</span>
-          </div>
-          {layersPanelOpen && (
-            <div className="flex-1 overflow-y-auto">
-              {[...elements].reverse().map((el) => {
-                const isSelected = el.id === selectedId;
-                return (
-                  <div
-                    key={el.id}
-                    onClick={() => setSelectedId(el.id)}
-                    className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer transition-colors ${
-                      isSelected
-                        ? 'bg-neutral-800 text-orange-400'
-                        : 'text-neutral-300 hover:bg-neutral-800/50 hover:text-white'
-                    }`}
-                  >
-                    <button
-                      onClick={(e) => { e.stopPropagation(); updateElement(el.id, { visible: !el.visible }); }}
-                      className={`shrink-0 ${el.visible ? 'text-neutral-500' : 'text-neutral-700'}`}
-                      title={el.visible ? 'Hide' : 'Show'}
-                    >
-                      {el.visible ? <IconEye /> : <IconEyeOff />}
-                    </button>
-                    <span
-                      className="w-3 h-3 rounded-sm shrink-0 border border-neutral-700"
-                      style={{ backgroundColor: el.type === 'text' ? (el.colour || '#1a1a1a') : el.fill }}
-                    />
-                    <span className="truncate font-medium flex-1">{el.name}</span>
-                    {el.locked && <span className="text-neutral-600"><IconLock /></span>}
-                    <span className="text-[10px] text-neutral-600 capitalize">{el.type}</span>
-                  </div>
-                );
-              })}
+        {/* ── Bottom Bar ──────────────────────────────────────────────── */}
+        {isVideoMode ? (
+          /* ── VIDEO TIMELINE ──────────────────────────────────────── */
+          <footer className="bg-neutral-950 border-t border-neutral-800 flex flex-col shrink-0 z-20" style={{ height: layersPanelOpen ? (keyframePanel ? 340 : 240) : 48 }}>
+            {/* Transport Controls */}
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-neutral-800 bg-neutral-900 shrink-0">
+              <button onClick={togglePlayback} className={`p-1.5 rounded-lg transition-colors ${isPlaying ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-green-600 hover:bg-green-700 text-white'}`} title={isPlaying ? 'Pause' : 'Play'}>
+                {isPlaying ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="4" width="5" height="16" rx="1"/><rect x="14" y="4" width="5" height="16" rx="1"/></svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+                )}
+              </button>
+              <button onClick={() => { stopPlayback(); setCurrentTime(0); }} className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white transition-colors" title="Stop">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+              </button>
+              <div className="font-mono text-xs text-neutral-300 bg-neutral-800 rounded px-2 py-1 tabular-nums min-w-[90px] text-center">
+                {currentTime.toFixed(1)}s / {totalDuration}s
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-neutral-500">Speed:</span>
+                {[0.5, 1, 1.5, 2].map(s => (
+                  <button key={s} onClick={() => setPlaybackSpeed(s)} className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${playbackSpeed === s ? 'bg-orange-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700'}`}>{s}x</button>
+                ))}
+              </div>
+              <div className="h-4 w-px bg-neutral-700 mx-1" />
+              {/* Timeline zoom */}
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-neutral-500">Zoom:</span>
+                <button onClick={() => setTimelineZoom(z => Math.max(0.5, z - 0.25))} className="px-1 py-0.5 text-[10px] bg-neutral-800 hover:bg-neutral-700 text-neutral-400 rounded">-</button>
+                <span className="text-[10px] text-neutral-300 w-8 text-center tabular-nums">{timelineZoom.toFixed(1)}x</span>
+                <button onClick={() => setTimelineZoom(z => Math.min(8, z + 0.25))} className="px-1 py-0.5 text-[10px] bg-neutral-800 hover:bg-neutral-700 text-neutral-400 rounded">+</button>
+              </div>
+              <div className="h-4 w-px bg-neutral-700 mx-1" />
+              {/* Keyframe toggle */}
+              <button onClick={() => setKeyframePanel(!keyframePanel)} className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded transition-colors ${keyframePanel ? 'bg-purple-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700'}`} title="Toggle Keyframes Panel">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L8 8H3l4.5 6L5 21l7-4 7 4-2.5-7L21 8h-5L12 2z"/></svg>
+                Keyframes
+              </button>
+              <button onClick={() => setRemotionPreview(!remotionPreview)} className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded transition-colors ${remotionPreview ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-700'}`} title="Toggle Remotion Preview">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><polygon points="10,7 16,10 10,13" fill="currentColor"/><line x1="4" y1="21" x2="20" y2="21"/></svg>
+                Remotion
+              </button>
+              <div className="flex items-center gap-1 ml-auto">
+                <span className="text-[10px] text-neutral-500">Duration:</span>
+                <input type="number" min={1} max={120} value={totalDuration} onChange={(e) => setTotalDuration(Math.max(1, parseInt(e.target.value) || 10))} className="w-14 bg-neutral-800 border border-neutral-700 rounded px-1.5 py-0.5 text-[11px] text-white text-center outline-none focus:border-orange-500" />
+                <span className="text-[10px] text-neutral-500">sec</span>
+              </div>
+              <button onClick={() => setLayersPanelOpen(!layersPanelOpen)} className="p-1 rounded hover:bg-neutral-700 text-neutral-500 hover:text-white transition-colors">
+                <span className={`inline-block transition-transform ${layersPanelOpen ? 'rotate-180' : ''}`}><IconChevronDown /></span>
+              </button>
             </div>
-          )}
-        </footer>
+
+            {/* Timeline tracks */}
+            {layersPanelOpen && (
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <div className="flex flex-1 overflow-hidden">
+                  {/* Track labels */}
+                  <div className="w-36 shrink-0 border-r border-neutral-800 overflow-y-auto">
+                    {elements.map((el) => (
+                      <div key={el.id} onClick={() => setSelectedId(el.id)} className={`flex items-center gap-1.5 px-2 h-7 text-[11px] cursor-pointer border-b border-neutral-800/50 transition-colors ${el.id === selectedId ? 'bg-neutral-800 text-orange-400' : 'text-neutral-400 hover:bg-neutral-800/50 hover:text-white'}`}>
+                        <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: el.type === 'text' ? (el.colour || '#fff') : el.fill }} />
+                        <span className="truncate flex-1">{el.name}</span>
+                        <span className="text-[8px] text-neutral-600">{getAnimation(el.id).keyframes.length > 0 ? `${getAnimation(el.id).keyframes.length}kf` : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {/* Timeline area (scrollable horizontally for zoom) */}
+                  <div className="flex-1 flex flex-col overflow-x-auto overflow-y-hidden">
+                    <div style={{ minWidth: `${timelineZoom * 100}%`, width: `${timelineZoom * 100}%` }}>
+                      {/* Time ruler — draggable for scrubbing */}
+                      <div
+                        ref={rulerRef}
+                        className="h-5 border-b border-neutral-800 bg-neutral-900 relative cursor-pointer select-none"
+                        onMouseDown={(e) => {
+                          if (isPlaying) return;
+                          setIsScrubbing(true);
+                          if (rulerRef.current) scrubToPosition(e.clientX, rulerRef.current);
+                        }}
+                      >
+                        {Array.from({ length: Math.ceil(totalDuration * 2) + 1 }, (_, i) => {
+                          const t = i * 0.5;
+                          if (t > totalDuration) return null;
+                          const isMajor = t === Math.floor(t);
+                          return (
+                            <div key={i} className="absolute bottom-0 flex flex-col items-center" style={{ left: `${(t / totalDuration) * 100}%` }}>
+                              {isMajor && <span className="text-[8px] text-neutral-500 tabular-nums">{t}s</span>}
+                              <div className={`w-px ${isMajor ? 'h-2 bg-neutral-600' : 'h-1 bg-neutral-800'}`} />
+                            </div>
+                          );
+                        })}
+                        <div className="absolute bottom-0 top-0 w-0.5 bg-red-500 z-10 pointer-events-none" style={{ left: `${(currentTime / totalDuration) * 100}%` }}>
+                          <div className="absolute -top-0.5 -left-1.5 w-3.5 h-3 bg-red-500 rounded-t-sm" style={{ clipPath: 'polygon(0 0, 100% 0, 50% 100%)' }} />
+                        </div>
+                      </div>
+                      {/* Element tracks */}
+                      <div
+                        ref={timelineRef}
+                        className="overflow-y-auto relative"
+                        style={{ minHeight: Math.max(elements.length * 28, 80) }}
+                        onMouseDown={(e) => {
+                          if (isPlaying) return;
+                          // Only scrub if clicking on empty track area (not a track bar)
+                          if ((e.target as HTMLElement).dataset.trackBg === 'true') {
+                            setIsScrubbing(true);
+                            if (timelineRef.current) scrubToPosition(e.clientX, timelineRef.current);
+                          }
+                        }}
+                      >
+                        {elements.map((el) => {
+                          const anim = getAnimation(el.id);
+                          const leftPct = (anim.startTime / totalDuration) * 100;
+                          const widthPct = (anim.duration / totalDuration) * 100;
+                          return (
+                            <div key={el.id} className="h-7 border-b border-neutral-800/50 relative" data-track-bg="true">
+                              <div
+                                onClick={(e) => { e.stopPropagation(); setSelectedId(el.id); }}
+                                className={`absolute top-1 bottom-1 rounded cursor-pointer transition-colors ${el.id === selectedId ? 'ring-1 ring-orange-500' : ''}`}
+                                style={{
+                                  left: `${leftPct}%`, width: `${widthPct}%`, minWidth: 16,
+                                  background: el.id === selectedId ? 'linear-gradient(135deg, #ea580c, #f97316)' : el.type === 'text' ? '#6366f1' : '#3b82f6',
+                                }}
+                                title={`${el.name}: ${anim.startTime.toFixed(1)}s - ${(anim.startTime + anim.duration).toFixed(1)}s`}
+                              >
+                                <span className="text-[8px] text-white/80 px-1 truncate block leading-5">{el.name}</span>
+                                {anim.enterAnimation !== 'none' && <div className="absolute left-0 top-0 bottom-0 w-3 bg-white/20 rounded-l" />}
+                                {anim.exitAnimation !== 'none' && <div className="absolute right-0 top-0 bottom-0 w-3 bg-black/20 rounded-r" />}
+                                {/* Keyframe diamonds on track bar */}
+                                {anim.keyframes.map((kf) => {
+                                  const kfPct = anim.duration > 0 ? (kf.time / anim.duration) * 100 : 0;
+                                  return (
+                                    <div
+                                      key={kf.id}
+                                      className="absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-yellow-400 rotate-45 border border-yellow-600 z-10"
+                                      style={{ left: `${kfPct}%`, marginLeft: -4 }}
+                                      title={`${kf.property}: ${kf.value} @ ${kf.time.toFixed(1)}s`}
+                                    />
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10 pointer-events-none" style={{ left: `${(currentTime / totalDuration) * 100}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Keyframe Editor Panel ── */}
+                {keyframePanel && selectedElement && (
+                  <div className="border-t border-neutral-800 bg-neutral-900 px-3 py-2 shrink-0" style={{ maxHeight: 120, overflowY: 'auto' }}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Keyframes — {selectedElement.name}</span>
+                      <div className="flex items-center gap-1">
+                        <select
+                          id="kf-prop-select"
+                          className="bg-neutral-800 border border-neutral-700 rounded px-1.5 py-0.5 text-[10px] text-white outline-none"
+                          defaultValue="x"
+                        >
+                          {KEYFRAME_PROPERTIES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                        </select>
+                        <button
+                          onClick={() => {
+                            const select = document.getElementById('kf-prop-select') as HTMLSelectElement;
+                            const prop = (select?.value || 'x') as KeyframeProperty;
+                            const el = selectedElement;
+                            const anim = getAnimation(el.id);
+                            const relTime = Math.max(0, currentTime - anim.startTime);
+                            const defaults: Record<KeyframeProperty, number> = { x: el.x, y: el.y, opacity: el.opacity, rotation: el.rotation, scaleX: 100, scaleY: 100, blur: el.blur };
+                            addKeyframe(el.id, prop, relTime, defaults[prop]);
+                          }}
+                          className="px-2 py-0.5 text-[10px] bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors"
+                        >
+                          + Add at {Math.max(0, currentTime - (getAnimation(selectedElement.id).startTime)).toFixed(1)}s
+                        </button>
+                      </div>
+                    </div>
+                    {/* Keyframe list */}
+                    {(() => {
+                      const anim = getAnimation(selectedElement.id);
+                      if (anim.keyframes.length === 0) return <p className="text-[10px] text-neutral-600 italic">No keyframes. Select a property and click Add to create one.</p>;
+                      return (
+                        <div className="space-y-1">
+                          {anim.keyframes.map(kf => (
+                            <div key={kf.id} className="flex items-center gap-2 bg-neutral-800 rounded px-2 py-1">
+                              <span className="text-[10px] text-yellow-400 font-mono">◆</span>
+                              <span className="text-[10px] text-neutral-300 w-16">{KEYFRAME_PROPERTIES.find(p => p.value === kf.property)?.label || kf.property}</span>
+                              <span className="text-[9px] text-neutral-500">@</span>
+                              <input type="number" step={0.1} min={0} value={kf.time} onChange={(e) => updateKeyframe(selectedElement.id, kf.id, { time: parseFloat(e.target.value) || 0 })} className="w-12 bg-neutral-700 rounded px-1 py-0.5 text-[10px] text-white text-center outline-none" />
+                              <span className="text-[9px] text-neutral-500">s =</span>
+                              <input type="number" step={1} value={kf.value} onChange={(e) => updateKeyframe(selectedElement.id, kf.id, { value: parseFloat(e.target.value) || 0 })} className="w-14 bg-neutral-700 rounded px-1 py-0.5 text-[10px] text-white text-center outline-none" />
+                              <select value={kf.easing} onChange={(e) => updateKeyframe(selectedElement.id, kf.id, { easing: e.target.value as Keyframe['easing'] })} className="bg-neutral-700 rounded px-1 py-0.5 text-[9px] text-neutral-300 outline-none">
+                                <option value="linear">Linear</option>
+                                <option value="ease">Ease</option>
+                                <option value="ease-in">Ease In</option>
+                                <option value="ease-out">Ease Out</option>
+                                <option value="ease-in-out">Ease In Out</option>
+                              </select>
+                              <button onClick={() => removeKeyframe(selectedElement.id, kf.id)} className="p-0.5 text-neutral-600 hover:text-red-400 transition-colors ml-auto" title="Remove keyframe">
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+          </footer>
+        ) : (
+          /* ── NORMAL LAYERS + QUICK INFO ────────────────────────── */
+          <footer className={`bg-neutral-900 border-t border-neutral-800 flex shrink-0 z-20 transition-all ${layersPanelOpen ? 'h-44' : 'h-9'}`}>
+            {/* Layers section */}
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-800">
+                <button onClick={() => setLayersPanelOpen(!layersPanelOpen)} className="flex items-center gap-2 hover:text-orange-400 transition-colors">
+                  <IconLayers />
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">Layers</span>
+                  <span className={`transition-transform ${layersPanelOpen ? 'rotate-180' : ''}`}><IconChevronDown /></span>
+                </button>
+                <span className="text-[11px] text-neutral-600 ml-auto">{elements.length}</span>
+              </div>
+              {layersPanelOpen && (
+                <div className="flex-1 overflow-y-auto">
+                  {[...elements].reverse().map((el, reverseIdx) => {
+                    const isElSelected = el.id === selectedId;
+                    const realIdx = elements.length - 1 - reverseIdx;
+                    return (
+                      <div
+                        key={el.id}
+                        onClick={() => setSelectedId(el.id)}
+                        className={`flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer transition-colors group ${
+                          isElSelected
+                            ? 'bg-neutral-800 text-orange-400'
+                            : 'text-neutral-300 hover:bg-neutral-800/50 hover:text-white'
+                        }`}
+                      >
+                        <button
+                          onClick={(e) => { e.stopPropagation(); updateElement(el.id, { visible: !el.visible }); }}
+                          className={`shrink-0 ${el.visible ? 'text-neutral-500' : 'text-neutral-700'}`}
+                          title={el.visible ? 'Hide' : 'Show'}
+                        >
+                          {el.visible ? <IconEye /> : <IconEyeOff />}
+                        </button>
+                        <span
+                          className="w-3 h-3 rounded-sm shrink-0 border border-neutral-700"
+                          style={{ backgroundColor: el.type === 'text' ? (el.colour || '#1a1a1a') : el.fill }}
+                        />
+                        <span className="truncate font-medium flex-1 min-w-0">{el.name}</span>
+                        {el.locked && <span className="text-neutral-600"><IconLock /></span>}
+                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); bringForward(el.id); }}
+                            disabled={realIdx >= elements.length - 1}
+                            className="p-0.5 rounded hover:bg-neutral-700 disabled:opacity-30 text-neutral-500 hover:text-white"
+                            title="Bring Forward"
+                          >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15" /></svg>
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); sendBackward(el.id); }}
+                            disabled={realIdx <= 0}
+                            className="p-0.5 rounded hover:bg-neutral-700 disabled:opacity-30 text-neutral-500 hover:text-white"
+                            title="Send Backward"
+                          >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); deleteElement(el.id); }}
+                            className="p-0.5 rounded hover:bg-red-900/50 text-neutral-600 hover:text-red-400"
+                            title="Delete Layer"
+                          >
+                            <IconTrash />
+                          </button>
+                        </div>
+                        <span className="text-[9px] text-neutral-600 capitalize w-8 text-right shrink-0">{el.type}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {/* Quick Info section (right side of bottom bar) */}
+            {layersPanelOpen && (
+              <div className="w-56 border-l border-neutral-800 px-3 py-2 flex flex-col gap-1.5 text-[10px] text-neutral-500 overflow-y-auto shrink-0">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400 mb-0.5">Quick Info</span>
+                <div className="flex justify-between"><span>Canvas</span><span className="text-neutral-300">{canvasWidth} x {canvasHeight}</span></div>
+                <div className="flex justify-between"><span>Zoom</span><span className="text-neutral-300">{zoom}%</span></div>
+                <div className="flex justify-between"><span>Elements</span><span className="text-neutral-300">{elements.length}</span></div>
+                <div className="flex justify-between"><span>Selected</span><span className="text-neutral-300 truncate ml-2">{selectedElement?.name || 'None'}</span></div>
+                <div className="flex justify-between"><span>Tool</span><span className="text-neutral-300 capitalize">{activeTool}</span></div>
+                {selectedElement && (
+                  <>
+                    <div className="border-t border-neutral-800 my-0.5" />
+                    <div className="flex justify-between"><span>Position</span><span className="text-neutral-300">{selectedElement.x}, {selectedElement.y}</span></div>
+                    <div className="flex justify-between"><span>Size</span><span className="text-neutral-300">{selectedElement.width} x {selectedElement.height}</span></div>
+                  </>
+                )}
+              </div>
+            )}
+          </footer>
+        )}
       </div>
 
       <ToastContainer toasts={toasts} />
-      <AIChatBot context="editor" />
+      {/* Hidden file input for image upload */}
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleImageUpload}
+        className="hidden"
+      />
     </>
   );
 }

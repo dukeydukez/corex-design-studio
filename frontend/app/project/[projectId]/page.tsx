@@ -163,6 +163,12 @@ const FORMAT_OPTIONS = [
   { label: 'A4 Document', dimensions: '2480x3508', category: 'Print' },
   { label: 'Letter Document', dimensions: '2550x3300', category: 'Print' },
   { label: 'Poster 24x36', dimensions: '7200x10800', category: 'Print' },
+  // Video
+  { label: 'Video Landscape (16:9)', dimensions: '1920x1080', category: 'Video' },
+  { label: 'Video Portrait (9:16)', dimensions: '1080x1920', category: 'Video' },
+  { label: 'Video Square (1:1)', dimensions: '1080x1080', category: 'Video' },
+  { label: 'Video Vertical (4:5)', dimensions: '1080x1350', category: 'Video' },
+  { label: 'Video Cinematic (2.39:1)', dimensions: '1920x803', category: 'Video' },
   // Presentation
   { label: 'Presentation 16:9', dimensions: '1920x1080', category: 'Presentation' },
   { label: 'Presentation 4:3', dimensions: '1024x768', category: 'Presentation' },
@@ -404,7 +410,7 @@ export default function ProjectDetailPage() {
     setShowCreateModal(false);
     const [w, h] = displayDimensions.split('x');
     const agentParam = selectedStartAgent ? `&agent=${selectedStartAgent}` : '';
-    router.push(`/design/${newDesign.id}/editor?w=${w}&h=${h}${agentParam}`);
+    router.push(`/design/${newDesign.id}/editor?w=${w}&h=${h}&name=${encodeURIComponent(newDesignName)}${agentParam}`);
   };
 
   const handleRunAgent = () => {
@@ -609,10 +615,23 @@ export default function ProjectDetailPage() {
               {filteredDesigns.map((design, i) => (
                 <Link
                   key={design.id}
-                  href={`/design/${design.id}/editor?w=${design.dimensions.split('x')[0]}&h=${design.dimensions.split('x')[1]}`}
+                  href={`/design/${design.id}/editor?w=${design.dimensions.split('x')[0]}&h=${design.dimensions.split('x')[1]}&name=${encodeURIComponent(design.name)}`}
                   className={`animate-fade-in-up stagger-${Math.min(i + 1, 12)} group bg-white border border-gray-200 rounded-2xl overflow-hidden hover:shadow-lg hover:shadow-gray-100/80 hover:border-gray-300 hover:scale-[1.01] transition-smooth cursor-pointer`}
                 >
-                  <div className={`h-40 bg-gradient-to-br ${design.gradient} relative`}>
+                  <div className={`h-40 bg-neutral-100 relative overflow-hidden`}>
+                    {/* Mini design preview */}
+                    <div className="absolute inset-2 bg-white rounded-lg shadow-sm border border-gray-100 flex items-center justify-center overflow-hidden">
+                      <div className="text-center">
+                        <div className="w-16 h-16 mx-auto rounded-lg bg-gradient-to-br from-orange-100 to-orange-50 flex items-center justify-center mb-2">
+                          <svg className="w-8 h-8 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <rect x="3" y="3" width="18" height="18" rx="2" strokeWidth="1.5" />
+                            <line x1="12" y1="3" x2="12" y2="21" strokeWidth="1" opacity="0.3" />
+                            <line x1="3" y1="12" x2="21" y2="12" strokeWidth="1" opacity="0.3" />
+                          </svg>
+                        </div>
+                        <span className="text-[10px] text-gray-400 font-medium">{design.dimensions}</span>
+                      </div>
+                    </div>
                     <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-smooth bg-black/20 backdrop-blur-[2px]">
                       <span className="px-4 py-2 bg-white/90 rounded-lg text-sm font-medium text-gray-900 shadow-lg">
                         Open in Editor
@@ -674,40 +693,61 @@ export default function ProjectDetailPage() {
                 const isSelected = selectedAgent?.id === agent.id;
 
                 return (
-                  <button
+                  <div
                     key={agent.id}
-                    onClick={() => {
-                      setSelectedAgent(isSelected ? null : agent);
-                      setAgentOutput(null);
-                      setAgentPrompt('');
-                    }}
-                    className={`animate-fade-in-up stagger-${Math.min(i + 1, 12)} text-left bg-white border rounded-2xl p-5 transition-smooth cursor-pointer ${
+                    className={`animate-fade-in-up stagger-${Math.min(i + 1, 12)} text-left bg-white border rounded-2xl p-5 transition-smooth ${
                       isSelected
                         ? `${styles.border} shadow-lg ring-2 ring-offset-1 ${styles.border} scale-[1.01]`
                         : `border-gray-200 hover:border-gray-300 hover:shadow-md hover:scale-[1.01]`
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-2xl">{agent.icon}</span>
-                      <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${styles.bg} ${styles.text}`}>
-                        {agent.category}
-                      </span>
-                    </div>
-                    <h4 className="text-sm font-semibold text-gray-900 mb-1">{agent.name}</h4>
-                    <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{agent.description}</p>
-                    <div className="flex flex-wrap gap-1.5 mt-3">
-                      {agent.capabilities.slice(0, 3).map((cap) => (
-                        <span key={cap} className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-100">
-                          {cap}
+                    <button
+                      onClick={() => {
+                        setSelectedAgent(isSelected ? null : agent);
+                        setAgentOutput(null);
+                        setAgentPrompt('');
+                      }}
+                      className="w-full text-left cursor-pointer"
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="text-2xl">{agent.icon}</span>
+                        <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${styles.bg} ${styles.text}`}>
+                          {agent.category}
                         </span>
-                      ))}
-                      {agent.capabilities.length > 3 && (
-                        <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-50 text-gray-400">
-                          +{agent.capabilities.length - 3}
-                        </span>
-                      )}
-                    </div>
-                  </button>
+                      </div>
+                      <h4 className="text-sm font-semibold text-gray-900 mb-1">{agent.name}</h4>
+                      <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{agent.description}</p>
+                      <div className="flex flex-wrap gap-1.5 mt-3">
+                        {agent.capabilities.slice(0, 3).map((cap) => (
+                          <span key={cap} className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-100">
+                            {cap}
+                          </span>
+                        ))}
+                        {agent.capabilities.length > 3 && (
+                          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-50 text-gray-400">
+                            +{agent.capabilities.length - 3}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                    {/* Open in Editor button */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Default sizes based on agent type
+                        const agentSizes: Record<string, { w: number; h: number }> = {
+                          'video-adapter': { w: 1920, h: 1080 },
+                          'social-adapter': { w: 1080, h: 1080 },
+                          'blog-adapter': { w: 1200, h: 630 },
+                        };
+                        const size = agentSizes[agent.id] || { w: 1080, h: 1080 };
+                        router.push(`/design/des-agent-${Date.now()}/editor?w=${size.w}&h=${size.h}&name=${encodeURIComponent(`${agent.name} — New Design`)}&agent=${agent.id}`);
+                      }}
+                      className={`mt-3 w-full py-2 text-xs font-semibold rounded-xl transition-smooth ${styles.bg} ${styles.text} hover:opacity-80`}
+                    >
+                      Open in Editor with {agent.name}
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -801,6 +841,20 @@ export default function ProjectDetailPage() {
                         className="px-4 py-2 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-smooth"
                       >
                         Run Again
+                      </button>
+                      <button
+                        onClick={() => {
+                          const agentSizes: Record<string, { w: number; h: number }> = {
+                            'video-adapter': { w: 1920, h: 1080 },
+                            'social-adapter': { w: 1080, h: 1080 },
+                            'blog-adapter': { w: 1200, h: 630 },
+                          };
+                          const size = agentSizes[selectedAgent.id] || { w: 1080, h: 1080 };
+                          router.push(`/design/des-agent-${Date.now()}/editor?w=${size.w}&h=${size.h}&name=${encodeURIComponent(`${selectedAgent.name} — ${agentPrompt.slice(0, 30)}`)}&agent=${selectedAgent.id}`);
+                        }}
+                        className="px-4 py-2 text-xs font-semibold text-white bg-orange-500 rounded-lg hover:bg-orange-600 transition-smooth"
+                      >
+                        Open in Editor
                       </button>
                     </div>
                   </div>
